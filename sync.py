@@ -18,23 +18,27 @@ GH_USER = "danielrosehill"
 
 
 def fetch_repos():
+    """Page through /user/repos (no 1000-cap, unlike `gh repo list`)."""
     out = subprocess.check_output(
         [
-            "gh", "repo", "list", GH_USER,
-            "--limit", "5000",
-            "--no-archived",
-            "--json", "name,url,description,visibility,createdAt,updatedAt",
+            "gh", "api", "--paginate",
+            "/user/repos?affiliation=owner&per_page=100",
+            "--jq",
+            '.[] | select(.archived==false) | '
+            '{name, url: .html_url, description, '
+            'visibility: (if .private then "private" else "public" end), '
+            'createdAt: .created_at, updatedAt: .updated_at}',
         ],
         text=True,
     )
-    return json.loads(out)
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
 def to_record(r):
     desc = r.get("description") or ""
     text = (
         f"Repository: {r['name']}. {desc} "
-        f"URL: {r['url']}. Visibility: {r['visibility'].lower()}."
+        f"URL: {r['url']}. Visibility: {r['visibility']}."
     ).strip()
     return {
         "_id": r["name"],
@@ -42,7 +46,7 @@ def to_record(r):
         "repo_name": r["name"],
         "repo_url": r["url"],
         "description": desc,
-        "visibility": r["visibility"].lower(),
+        "visibility": r["visibility"],
         "created_at": r["createdAt"],
         "updated_at": r["updatedAt"],
     }
