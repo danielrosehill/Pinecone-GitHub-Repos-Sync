@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Sync danielrosehill GitHub repos into Pinecone (daniel-personal / github-repos).
+"""Incrementally sync danielrosehill GitHub repos into Pinecone.
 
-Upserts non-archived repos; deletes records whose repos no longer exist or were archived.
+Index: daniel-personal, namespace: github-repos.
+- Upserts only repos whose updated_at is newer than what's stored, or that are missing.
+- Deletes records for repos that no longer exist or were archived.
 """
 import json
 import os
@@ -19,7 +21,7 @@ def fetch_repos():
     out = subprocess.check_output(
         [
             "gh", "repo", "list", GH_USER,
-            "--limit", "2000",
+            "--limit", "5000",
             "--no-archived",
             "--json", "name,url,description,visibility,createdAt,updatedAt",
         ],
@@ -47,10 +49,25 @@ def to_record(r):
 
 
 def list_existing_ids(index):
-    ids = set()
+    ids = []
     for page in index.list(namespace=NAMESPACE):
-        ids.update(page)
+        ids.extend(page)
     return ids
+
+
+def fetch_existing_updated_at(index, ids):
+    """Return {id: updated_at} for the given ids, in batches of 100."""
+    out = {}
+    for i in range(0, len(ids), 100):
+        batch = ids[i : i + 100]
+        resp = index.fetch(ids=batch, namespace=NAMESPACE)
+        vectors = getattr(resp, "vectors", None) or resp.get("vectors", {})
+        for vid, v in vectors.items():
+            meta = getattr(v, "metadata", None) or v.get("metadata", {}) or {}
+            ua = meta.get("updated_at")
+            if ua:
+                out[vid] = ua
+    return out
 
 
 def main():
@@ -59,18 +76,26 @@ def main():
     index = pc.Index(INDEX_NAME)
 
     repos = fetch_repos()
-    print(f"fetched {len(repos)} non-archived repos")
+    print(f"fetched {len(repos)} non-archived repos from GitHub")
 
     records = [to_record(r) for r in repos]
     current_ids = {r["_id"] for r in records}
 
-    BATCH = 96
-    for i in range(0, len(records), BATCH):
-        index.upsert_records(NAMESPACE, records[i : i + BATCH])
-    print(f"upserted {len(records)} records")
+    existing_ids = list_existing_ids(index)
+    print(f"namespace currently has {len(existing_ids)} records")
+    existing_ua = fetch_existing_updated_at(index, existing_ids)
 
-    existing = list_existing_ids(index)
-    stale = sorted(existing - current_ids)
+    to_upsert = [
+        r for r in records
+        if existing_ua.get(r["_id"]) != r["updated_at"]
+    ]
+    print(f"upserting {len(to_upsert)} new/changed records")
+
+    BATCH = 96
+    for i in range(0, len(to_upsert), BATCH):
+        index.upsert_records(NAMESPACE, to_upsert[i : i + BATCH])
+
+    stale = sorted(set(existing_ids) - current_ids)
     if stale:
         print(f"deleting {len(stale)} stale records: {stale[:10]}{'...' if len(stale) > 10 else ''}")
         for i in range(0, len(stale), 1000):
